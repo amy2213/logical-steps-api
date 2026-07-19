@@ -312,6 +312,7 @@ export default {
     { role: 'user', content: text },
   ],
 }),
+      });
     } catch {
       return json(
         { error: { code: 'UPSTREAM_UNAVAILABLE', message: 'The analysis provider could not be reached.' } },
@@ -374,3 +375,5 @@ export default {
     }
   },
 };
+
+
