@@ -323,8 +323,11 @@ export default {
 
     const upstreamText = await upstream.text();
 
-    if (!upstream.ok) {
-      console.error('OpenRouter rejected request', { status: upstream.status });
+   if (!upstream.ok) {
+  console.error('OpenRouter rejected request', {
+    status: upstream.status,
+    body: upstreamText.slice(0, 2000),
+  });
       return json(
         {
           error: {
