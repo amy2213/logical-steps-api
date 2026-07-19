@@ -223,16 +223,95 @@ export default {
           'HTTP-Referer': SITE_URL,
           'X-OpenRouter-Title': 'Logical Steps Dashboard',
         },
-        body: JSON.stringify({
-          model: MODEL,
-          temperature: 0.1,
-          max_tokens: 2200,
-          messages: [
-            { role: 'system', content: systemPrompt() },
-            { role: 'user', content: text },
-          ],
-        }),
-      });
+       body: JSON.stringify({
+  model: MODEL,
+  temperature: 0.1,
+  max_tokens: 2200,
+  provider: {
+    require_parameters: true,
+  },
+  response_format: {
+    type: 'json_schema',
+    json_schema: {
+      name: 'logical_steps_analysis',
+      strict: true,
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['gist', 'nodes'],
+        properties: {
+          gist: {
+            type: 'string',
+            minLength: 1,
+          },
+          nodes: {
+            type: 'array',
+            minItems: 1,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: [
+                'id',
+                'role',
+                'plain',
+                'original',
+                'dependsOn',
+              ],
+              properties: {
+                id: {
+                  type: 'string',
+                  minLength: 1,
+                },
+                role: {
+                  type: 'string',
+                  enum: [
+                    'context',
+                    'premise',
+                    'conclusion',
+                    'assumption',
+                    'counterpoint',
+                  ],
+                },
+                plain: {
+                  type: 'string',
+                  minLength: 1,
+                },
+                original: {
+                  type: 'string',
+                },
+                connective: {
+                  type: 'string',
+                  enum: [
+                    'because',
+                    'therefore',
+                    'unless',
+                    'but',
+                    'if/then',
+                  ],
+                },
+                dependsOn: {
+                  type: 'array',
+                  items: {
+                    type: 'string',
+                  },
+                },
+                confidence: {
+                  type: 'number',
+                  minimum: 0,
+                  maximum: 1,
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+  messages: [
+    { role: 'system', content: systemPrompt() },
+    { role: 'user', content: text },
+  ],
+}),
     } catch {
       return json(
         { error: { code: 'UPSTREAM_UNAVAILABLE', message: 'The analysis provider could not be reached.' } },
