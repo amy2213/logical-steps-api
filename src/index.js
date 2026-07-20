@@ -12,8 +12,13 @@ function reply(body,status,origin,extra={}){return new Response(JSON.stringify(b
 function parseJson(content){if(typeof content!=='string'||!content.trim())throw new Error('Empty model response.');return JSON.parse(content.trim().replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/i,''));}
 function words(s){return String(s||'').toLowerCase().match(/[a-z0-9]+/g)||[];}
 function similar(a,b){const aa=new Set(words(a)),bb=new Set(words(b));if(!aa.size||!bb.size)return 0;let common=0;for(const w of aa)if(bb.has(w))common++;return common/Math.max(aa.size,bb.size);}
-function validGist(g){if(typeof g!=='string')return false;const t=g.trim();return t.length>=20&&words(t).length>=4&&!BAD_GISTS.has(t.toLowerCase());}
-function fallbackGist(nodes){const primary=nodes.find(n=>n.role==='conclusion'&&n.conclusionType==='primary')||nodes.find(n=>n.role==='conclusion')||nodes[nodes.length-1];return primary?.plain||'The text presents a connected set of claims and supporting reasons.';}
+function oneSentence(s){const t=String(s||'').trim().replace(/[.!?]\s*$/,'');return !/[.!?]\s+\S/.test(t);}
+function validGist(g){if(typeof g!=='string')return false;const t=g.trim();return t.length>=20&&t.length<=180&&words(t).length>=4&&oneSentence(t)&&!BAD_GISTS.has(t.toLowerCase());}
+function compactGist(text){const t=String(text||'').trim().replace(/\s+/g,' ');return t.length<=180?t:`${t.slice(0,177).trimEnd()}...`;}
+function fallbackGist(nodes){const primary=nodes.find(n=>n.role==='conclusion'&&n.conclusionType==='primary')||nodes.find(n=>n.role==='conclusion')||nodes[nodes.length-1];return compactGist(primary?.plain||'The text presents a connected set of claims and supporting reasons.');}
+function hasConcessionCue(text){return /\b(while proponents|while opponents|critics? (?:say|argue|claim)|opponents? (?:say|argue|claim)|supporters? (?:say|argue|claim)|some (?:say|argue|claim)|i understand|although .*?(?:say|argue|claim)|admittedly|to be fair)\b/i.test(text);}
+function hasMiniArgumentCue(text){return /\b(if .+? then|therefore|thus|so,? |for that reason|which means|as a result)\b/i.test(text);}
+function needsRepair(value,text){if(!validGist(value?.gist)||!Array.isArray(value?.nodes))return true;const nodes=value.nodes;const primary=nodes.filter(n=>n?.role==='conclusion'&&n?.conclusionType==='primary').length;if(primary!==1)return true;if(hasConcessionCue(text)&&!nodes.some(n=>n?.role==='counterpoint'))return true;if(hasMiniArgumentCue(text)&&nodes.filter(n=>n?.role==='conclusion').length<2&&nodes.length>=5)return true;return false;}
 
 function normalize(value,sourceText,elapsedMs){
  if(!value||typeof value!=='object'||Array.isArray(value))throw new Error('Analysis must be an object.');
@@ -25,29 +30,39 @@ function normalize(value,sourceText,elapsedMs){
   if(ids.has(id))throw new Error('Node IDs must be unique.');ids.add(id);
   if(!ROLES.has(raw.role))throw new Error(`Unknown node role: ${raw.role}`);
   if(typeof raw.plain!=='string'||!raw.plain.trim())throw new Error('Every node requires plain text.');
-  const node={id,role:raw.role,plain:raw.plain.trim(),original:typeof raw.original==='string'?raw.original:'',dependsOn:Array.isArray(raw.dependsOn)?raw.dependsOn.filter(x=>typeof x==='string'):[]};
-  if(raw.role==='conclusion')node.conclusionType=raw.conclusionType==='primary'?'primary':'intermediate';
+  const original=typeof raw.original==='string'?raw.original.trim():'';
+  const role=raw.role==='assumption'&&original?'premise':raw.role;
+  const node={id,role,plain:raw.plain.trim(),original:role==='assumption'?'':original,dependsOn:Array.isArray(raw.dependsOn)?raw.dependsOn.filter(x=>typeof x==='string'):[]};
+  if(role==='conclusion')node.conclusionType=raw.conclusionType==='primary'?'primary':'intermediate';
   if(typeof raw.confidence==='number'&&raw.confidence>=0&&raw.confidence<=1)node.confidence=raw.confidence;
   if(similar(node.plain,node.original)>=.9)node.original='';
   return node;
  });
- for(const node of nodes){node.dependsOn=node.dependsOn.filter(id=>ids.has(id)&&id!==node.id);if(node.dependsOn.length&&CONNECTIVES.has(value.nodes.find(n=>n?.id===node.id)?.connective))node.connective=value.nodes.find(n=>n?.id===node.id).connective;}
- const conclusions=nodes.filter(n=>n.role==='conclusion');if(conclusions.length&&!conclusions.some(n=>n.conclusionType==='primary'))conclusions[conclusions.length-1].conclusionType='primary';
+ for(const node of nodes){node.dependsOn=node.dependsOn.filter(id=>ids.has(id)&&id!==node.id);const raw=value.nodes.find(n=>n?.id===node.id);if(node.dependsOn.length&&CONNECTIVES.has(raw?.connective))node.connective=raw.connective;}
+ const conclusions=nodes.filter(n=>n.role==='conclusion');
+ if(conclusions.length){let primary=conclusions.filter(n=>n.conclusionType==='primary');if(primary.length===0)conclusions[conclusions.length-1].conclusionType='primary';if(primary.length>1){for(const n of primary.slice(0,-1))n.conclusionType='intermediate';}}
  const gist=validGist(value.gist)?value.gist.trim():fallbackGist(nodes);
  return{id:crypto.randomUUID(),sourceText,gist,nodes,meta:{model:MODEL,elapsedMs}};
 }
 
-function prompt(repair=false){return `You map arguments for neurodivergent readers. Return JSON only.${repair?' The previous answer failed quality checks; correct it carefully.':''}
-Shape: {"gist":"one useful sentence, never a placeholder","nodes":[{"id":"n1","role":"context|premise|conclusion|assumption|counterpoint","conclusionType":"primary|intermediate when role is conclusion","plain":"genuine plain-language rewrite","original":"exact source wording, or empty for assumptions","connective":"because|therefore|unless|but|if/then","dependsOn":[],"confidence":0.9}]}
+function prompt(repair=false){return `You map arguments for neurodivergent readers. Return JSON only.${repair?' The previous answer missed an argument role or quality rule; correct it carefully.':''}
+Shape: {"gist":"one sentence, 20-180 characters","nodes":[{"id":"n1","role":"context|premise|conclusion|assumption|counterpoint","conclusionType":"primary|intermediate when role is conclusion","plain":"genuine plain-language rewrite","original":"exact source wording, or empty for assumptions","connective":"because|therefore|unless|but|if/then","dependsOn":[],"confidence":0.9}]}
 Rules:
 - connective describes how THIS node follows from dependsOn; omit it when dependsOn is empty.
-- Identify the author's main conclusion as conclusionType primary; other conclusions are intermediate.
-- Context only sets the scene. A reason offered in support is premise. An opposing view is counterpoint.
-- Add an assumption only when an unstated bridge is necessary; never invent one just to fill the role.
-- Rewrite plain substantially and conversationally; do not copy original unless no clearer wording is possible.
-- Preserve uncertainty and qualifiers. Never claim the argument is factually true.
-Example: Text: "Retention rose after flexible hours began, so the policy works. Critics say output may fall."
-Output: {"gist":"The author argues flexible hours work because retention improved, while acknowledging concern about productivity.","nodes":[{"id":"n1","role":"premise","plain":"Employee retention improved after flexible hours started.","original":"Retention rose after flexible hours began","dependsOn":[]},{"id":"n2","role":"assumption","plain":"The timing suggests flexible hours caused the retention improvement.","original":"","dependsOn":["n1"],"connective":"because"},{"id":"n3","role":"counterpoint","plain":"Critics worry flexible hours could reduce output.","original":"Critics say output may fall","dependsOn":[],"connective":"but"},{"id":"n4","role":"conclusion","conclusionType":"primary","plain":"The flexible-hours policy is effective.","original":"the policy works","dependsOn":["n1","n2"],"connective":"therefore"}]}`;}
+- Identify exactly one main conclusion as conclusionType primary.
+- Mark a supported claim that later supports another claim as conclusionType intermediate. Mini-arguments must not be flattened into premises.
+- Context only sets the scene. A reason the author endorses is premise.
+- Counterpoint means a view the author reports, concedes, or acknowledges without endorsing. Clauses such as "While proponents assert..." and "I understand the team has been stretched thin" are counterpoints when the author then argues another position.
+- Do not label the author's own warning or reason as counterpoint. "Using placeholder data would reflect poorly on the team" is a premise when the author uses it to support waiting for real data.
+- Add an assumption only when an unstated bridge is necessary. Assumptions must have original:"".
+- Rewrite plain substantially and conversationally; preserve uncertainty and qualifiers.
+- Gist must be one concise sentence, 20-180 characters, focused on the primary conclusion.
+Example 1: Text: "While proponents assert that increased density would ease the housing shortage, the proposal lacks transit funding, so the council should delay approval."
+Output: {"gist":"The council should delay the density proposal because it lacks transit funding despite supporters' housing argument.","nodes":[{"id":"n1","role":"counterpoint","plain":"Supporters say greater density would reduce the housing shortage.","original":"While proponents assert that increased density would ease the housing shortage","dependsOn":[]},{"id":"n2","role":"premise","plain":"The proposal does not include transit funding.","original":"the proposal lacks transit funding","dependsOn":[]},{"id":"n3","role":"conclusion","conclusionType":"primary","plain":"The council should delay approving the proposal.","original":"the council should delay approval","dependsOn":["n1","n2"],"connective":"therefore"}]}
+Example 2: Text: "I understand the team has been stretched thin. But placeholder data would reflect poorly on everyone, so we should wait for the verified figures."
+Output: {"gist":"The team should wait for verified figures because placeholder data would damage its credibility.","nodes":[{"id":"n1","role":"counterpoint","plain":"The team has been under heavy workload pressure.","original":"I understand the team has been stretched thin","dependsOn":[]},{"id":"n2","role":"premise","plain":"Placeholder data would make the team look unreliable.","original":"placeholder data would reflect poorly on everyone","dependsOn":[]},{"id":"n3","role":"conclusion","conclusionType":"primary","plain":"The team should wait for verified figures.","original":"we should wait for the verified figures","dependsOn":["n1","n2"],"connective":"therefore"}]}
+Example 3: Text: "Daniel's membership expired. If he returns, he must pay the standard rate. Therefore, the desk should not promise him the old discount."
+Output: {"gist":"The desk should not promise Daniel the old discount because a returning member must pay the standard rate.","nodes":[{"id":"n1","role":"premise","plain":"Daniel's membership is no longer active.","original":"Daniel's membership expired","dependsOn":[]},{"id":"n2","role":"conclusion","conclusionType":"intermediate","plain":"If Daniel comes back, he must pay the standard rate.","original":"If he returns, he must pay the standard rate","dependsOn":["n1"],"connective":"if/then"},{"id":"n3","role":"conclusion","conclusionType":"primary","plain":"The desk should not promise Daniel his former discount.","original":"the desk should not promise him the old discount","dependsOn":["n2"],"connective":"therefore"}]}`;}
 
 async function callModel(env,text,repair=false){
  const r=await fetch(OPENROUTER_URL,{method:'POST',headers:{Authorization:`Bearer ${env.OPENROUTER_API_KEY}`,'Content-Type':'application/json','HTTP-Referer':SITE_URL,'X-OpenRouter-Title':'Logical Steps Dashboard'},body:JSON.stringify({model:MODEL,temperature:.1,max_tokens:2400,response_format:{type:'json_object'},messages:[{role:'system',content:prompt(repair)},{role:'user',content:text}]})});
@@ -71,5 +86,5 @@ export default{async fetch(request,env){
  const human=await verifyTurnstile(env,body.turnstileToken,ip);if(!human)return reply({error:{code:'HUMAN_VERIFICATION_FAILED',message:'Please complete the human verification and try again.'}},403,origin);
  const perIp=await takeLimit(env,`ip:${ip}`,ip,10,10*60*1000);if(!perIp.allowed)return reply({error:{code:'RATE_LIMITED',message:'Too many analyses from this connection. Please wait before trying again.'}},429,origin,{'Retry-After':String(perIp.reset),'X-RateLimit-Limit':'10','X-RateLimit-Remaining':'0'});
  const global=await takeLimit(env,'global-daily','all',300,24*60*60*1000);if(!global.allowed)return reply({error:{code:'DAILY_LIMIT_REACHED',message:'Logical Steps has reached its daily analysis limit. Please try again tomorrow.'}},429,origin,{'Retry-After':String(global.reset)});
- try{let model=await callModel(env,text,false);let analysis=normalize(model,text,Date.now()-started);if(!validGist(model.gist)){model=await callModel(env,text,true);analysis=normalize(model,text,Date.now()-started);}return reply(analysis,200,origin,{'X-RateLimit-Limit':'10','X-RateLimit-Remaining':String(perIp.remaining)});}catch(error){console.error('Analysis failed',{message:error instanceof Error?error.message:'Unknown error',detail:error?.detail});return reply({error:{code:error?.status?'UPSTREAM_ERROR':'INVALID_ANALYSIS',message:error?.status?'The analysis provider could not complete this request.':'The provider returned an invalid logical map.'}},502,origin);}
+ try{let model=await callModel(env,text,false);if(needsRepair(model,text))model=await callModel(env,text,true);const analysis=normalize(model,text,Date.now()-started);return reply(analysis,200,origin,{'X-RateLimit-Limit':'10','X-RateLimit-Remaining':String(perIp.remaining)});}catch(error){console.error('Analysis failed',{message:error instanceof Error?error.message:'Unknown error',detail:error?.detail});return reply({error:{code:error?.status?'UPSTREAM_ERROR':'INVALID_ANALYSIS',message:error?.status?'The analysis provider could not complete this request.':'The provider returned an invalid logical map.'}},502,origin);}
 }};
