@@ -1,4 +1,3 @@
-$schema = "node_modules/wrangler/config-schema.json"
 name = "logical-steps-api"
 main = "src/index.js"
 compatibility_date = "2026-07-19"
